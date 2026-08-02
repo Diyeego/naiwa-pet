@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# API 配置（含密钥，切勿上传）
+api_config.json
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# Release 压缩包（通过 GitHub Release 单独上传）
+release/
+
+# 陪伴时长记录
+naiwa_time.txt
+
+# 临时文件
+*.log
