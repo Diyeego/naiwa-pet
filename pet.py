@@ -42,6 +42,14 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
+# 用户数据目录：API 配置和陪伴时长存到这里，与程序位置无关
+# （避免 exe 换位置/重装后配置丢失的"目录不一致"问题）
+DATA_DIR = os.path.join(os.environ.get("APPDATA", BASE_DIR), "naiwa-pet")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    DATA_DIR = BASE_DIR
+
 # ========== 配置 ==========
 PET_IMAGES = ["pet1.png", "pet2.png", "pet3.png"]   # 桌宠形象列表
 PET_DISPLAY_WIDTH = 200                             # 形象显示宽度（等比缩放）
@@ -52,8 +60,8 @@ VIDEO_PLAY_WIDTH = 600                              # 视频播放时窗口宽�
 FLOAT_AMPLITUDE = 6                                 # 飘浮幅度（像素）
 FLOAT_SPEED = 2.0                                   # 飘浮速度
 PET_ALPHA_THRESHOLD = 30                            # 图片 alpha 低于此值视为背景（透掉）
-TIME_FILE = "naiwa_time.txt"                        # 陪伴时长持久化文件
-API_CONFIG_FILE = "api_config.json"                 # API 配置持久化文件
+TIME_FILE = os.path.join(DATA_DIR, "naiwa_time.txt")   # 陪伴时长持久化文件（用户数据目录）
+API_CONFIG_FILE = os.path.join(DATA_DIR, "api_config.json")  # API 配置持久化文件（用户数据目录）
 
 # 绿幕色键参数
 CHROMA_G_MIN = 100      # 绿色通道最低值（排除暗部）
@@ -818,8 +826,20 @@ class DesktopPet:
 
     # ========== 陪伴时长 ==========
 
+    def _migrate_legacy(self, filename):
+        """把程序目录下的旧文件迁移到用户数据目录（一次性）"""
+        legacy = os.path.join(BASE_DIR, filename)
+        new = os.path.join(DATA_DIR, filename)
+        if os.path.exists(legacy) and not os.path.exists(new):
+            try:
+                import shutil
+                shutil.copy2(legacy, new)
+            except Exception:
+                pass
+
     def load_total_minutes(self):
-        """从文件读取累计陪伴分钟数"""
+        """从用户数据目录读取累计陪伴分钟数（自动迁移旧文件）"""
+        self._migrate_legacy("naiwa_time.txt")
         try:
             with open(TIME_FILE, "r", encoding="utf-8") as f:
                 return int(f.read().strip())
@@ -912,7 +932,8 @@ class DesktopPet:
     # ========== API 配置 ==========
 
     def load_api_config(self):
-        """从配置文件加载 API 配置"""
+        """从用户数据目录加载 API 配置（自动迁移旧文件）"""
+        self._migrate_legacy("api_config.json")
         try:
             with open(API_CONFIG_FILE, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -965,7 +986,7 @@ class DesktopPet:
             self.stop_video_playback()
 
         if not self.is_api_configured():
-            self.show_speech_bubble("本蛙还不会说话呢～先去「主菜单」配置 API 吧！")
+            self.show_speech_bubble("本蛙还不会说话～主菜单已打开，填上你的 API Key 就能聊啦！")
             self.open_main_menu()
             return
 
@@ -1188,6 +1209,11 @@ class MainMenu:
     def __init__(self, owner):
         self.owner = owner
         self.cfg = owner.load_api_config()
+        # 预填默认值：没有配置时，用户只需填 API Key 即可对话
+        if not self.cfg.get("base_url"):
+            self.cfg["base_url"] = "https://api.deepseek.com"
+        if not self.cfg.get("model"):
+            self.cfg["model"] = "deepseek-chat"
 
         self.win = tk.Toplevel(owner.window)
         self.win.title("奶蛙桌宠 · 主菜单")
