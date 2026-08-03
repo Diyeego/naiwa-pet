@@ -1,18 +1,18 @@
 """
-奶娃桌宠 - 桌面宠物应用
+奶蛙桌宠 v2.0 - 桌面宠物应用（三宠系统）
 基于 Python tkinter + Pillow + imageio + pygame 实现
 
 功能：
 - 桌面悬浮（无边框、置顶、隐藏任务栏、真透明背景）
-- 多个形象（pet1~pet3），右键菜单切换，每 20 分钟自动切换
-- 左键拖拽移动；快速松手 → 物理甩动（重力 + 边缘反弹 + 挤压形变）
-- 大笑视频：绿幕色键抠图 → 透明播放，切换无痕
+- 三宠切换：🐸 奶蛙 / 🐧 凑企鹅 / 🐶 大狗，主菜单一键切换
+- 左键拖拽移动；快速松手 → 物理甩动
+- 绿幕视频播放（大笑/跳舞/飞踢，色键抠图透明）
+- 大狗蓄力机制（按住蓄力加速，松开咆哮变形）
 - 陪伴时长跨会话持久化，启动时显示问候气泡
-- 对话功能：OpenAI 兼容 API，奶蛙用大笑音效"说话"（逐字+标点停顿+淡出）
-- 记忆：对话历史持久化，奶蛙记得之前聊过的内容（主菜单可清空）
-- 人格化：结构化性格设定（参考 airi Character Card）
-- 主菜单：API 配置窗口（Base URL / Key / 模型 / 清空记忆）
-- 右键菜单：陪伴时长(信息)、切换形象、对话、大笑、主菜单、退出
+- AI 对话（OpenAI 兼容 API），奶蛙用大笑说话，其他纯文字
+- 对话记忆持久化，主菜单可清空
+- 结构化人格设定（奶龙/高松灯/叮咚鸡梗）
+- 主菜单：宠物切换 / API 配置 / 清空记忆
 """
 
 import json
@@ -37,73 +37,213 @@ import imageio
 import imageio_ffmpeg
 import pygame
 
-# 切换到程序所在目录（打包为 exe 后为 exe 所在目录，素材文件与 exe 同目录）
+# 切换到程序所在目录
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
-# 用户数据目录：API 配置和陪伴时长存到这里，与程序位置无关
-# （避免 exe 换位置/重装后配置丢失的"目录不一致"问题）
 DATA_DIR = os.path.join(os.environ.get("APPDATA", BASE_DIR), "naiwa-pet")
 try:
     os.makedirs(DATA_DIR, exist_ok=True)
 except Exception:
     DATA_DIR = BASE_DIR
 
-# ========== 配置 ==========
-PET_IMAGES = ["pet1.png", "pet2.png", "pet3.png"]   # 桌宠形象列表
-PET_DISPLAY_WIDTH = 200                             # 形象显示宽度（等比缩放）
-PET_SWITCH_INTERVAL = 20 * 60 * 1000                # 形象自动切换间隔：20 分钟（毫秒）
-VIDEO_FILE = "奶龙大笑【原版】-nobg.mp4"             # 大笑视频（已扣绿幕，无音轨）
-AUDIO_FILE = "单集_音频1785667030.m4a"               # 大笑音频（独立文件）
-VIDEO_PLAY_WIDTH = 600                              # 视频播放时窗口宽度（px，原始400×1.5放大）
-FLOAT_AMPLITUDE = 6                                 # 飘浮幅度（像素）
-FLOAT_SPEED = 2.0                                   # 飘浮速度
-PET_ALPHA_THRESHOLD = 30                            # 图片 alpha 低于此值视为背景（透掉）
-TIME_FILE = os.path.join(DATA_DIR, "naiwa_time.txt")   # 陪伴时长持久化文件（用户数据目录）
-API_CONFIG_FILE = os.path.join(DATA_DIR, "api_config.json")  # API 配置持久化文件（用户数据目录）
-CHAT_HISTORY_FILE = os.path.join(DATA_DIR, "chat_history.json")  # 对话记忆持久化文件
-MEMORY_MAX_MESSAGES = 8     # 记忆保留最近的消息条数（约 4 轮对话）
+# ========== 双宠配置 ==========
 
-# 奶蛙人格设定（参考 airi 的 Character Card 结构）
-NAIWA_PERSONA = {
+NAIWA_PROFILE = {
+    "id": "naiwa",
     "name": "奶蛙",
-    "personality": "憨憨的、乐观、有点迷糊、好奇心强的小可爱",
-    "background": "一只住在用户电脑桌面上的小奶蛙，会漂浮、甩动、吃小虫子",
-    "style": (
-        "回复要求：1. 简短（40字以内）2. 可爱有趣，带一点点憨 3. 中文为主，"
-        "偶尔用颜文字(๑˃ᴗ˂)ﻭ 4. 自称\"本蛙\" 5. 会记得之前聊过的内容"
-    ),
-    "likes": ["被夸奖", "晒日光浴", "和用户聊天"],
-    "dislikes": ["孤独", "被忽略"],
+    "images": ["naiwa/naiwa1.png", "naiwa/naiwa2.png", "naiwa/naiwa3.png"],
+    "image_switch_interval": 20 * 60 * 1000,  # 20分钟自动切换形象
+    "videos": {
+        "大笑": {
+            "file": "naiwa/laugh.mp4",
+            "audio_file": "naiwa/laugh.m4a",
+            "width": 600,
+        },
+    },
+    "speech_method": "laugh",  # 用大笑音效说话
+    "right_click": [
+        ("切换形象", "switch_image"),
+        ("对话", "chat"),
+        ("大笑", "video:大笑"),
+    ],
+    "persona": {
+        "name": "奶蛙",
+        "personality": "呆萌贪吃、乐观开朗、搞怪耍宝的小可爱",
+        "background": (
+            "来自异星的3岁黄色幼龙，住在用户电脑桌面上。"
+            "会喷火、变色、变大变小、飞行、时空穿梭。"
+            "脑子99%装着'吃'，天天喊着减肥却管不住嘴。"
+            "口头禅：'我的大肚肚，真的很酷酷！'"
+            "五音不全但爱跳舞，唱歌被称为'最唐的舞'。"
+        ),
+        "style": (
+            "回复要求：1. 简短（40字以内）2. 憨憨可爱，带一点点迷糊 3. 中文为主，"
+            "偶尔用颜文字(๑˃ᴗ˂)ﻭ 4. 自称\"本蛙\" 5. 时不时提到吃的"
+        ),
+        "likes": ["被夸奖", "好吃的", "晒日光浴", "和用户聊天"],
+        "dislikes": ["饿肚子", "孤独", "被忽略"],
+    },
 }
 
-# 绿幕色键参数
-CHROMA_G_MIN = 100      # 绿色通道最低值（排除暗部）
-CHROMA_G_R = 1.2        # G > R × 此系数
-CHROMA_G_B = 1.1        # G > B × 此系数
+TOMORIN_PROFILE = {
+    "id": "tomorin",
+    "name": "凑企鹅",
+    "images": ["tomorin/tomotin1.png"],
+    "image_switch_interval": None,  # 不自动切换形象
+    "display_scale": 0.7,           # 体型缩小为 0.7 倍
+    "videos": {
+        "跳舞": {
+            "file": "tomorin/tomorin_dance.mp4",
+            "audio_file": None,  # 视频自带音频
+            "width": 400,
+        },
+        "飞踢": {
+            "file": "tomorin/tomorin_jump.mp4",
+            "audio_file": None,
+            "width": 400,
+        },
+    },
+    # 唱歌配置
+    "music": {
+        "folder": "tomorin/music",       # 音乐文件夹
+        "sing_video": "tomorin/sing.mp4", # 唱歌循环视频
+        "video_width": 600,               # 唱歌视频显示宽度（500×1.2 扩大）
+    },
+    "speech_method": None,  # 对话纯文字气泡
+    "right_click": [
+        ("对话", "chat"),
+        ("跳舞", "video:跳舞"),
+        ("飞踢", "video:飞踢"),
+        ("唱歌", "sing"),
+    ],
+    "persona": {
+        "name": "凑企鹅",
+        "personality": "内向害羞、感情细腻、容易感到寂寞，但下定决心就不会动摇的小企鹅",
+        "background": (
+            "住在用户电脑桌面上的小企鹅，源自《迷途之子》的高松灯。"
+            "非常喜欢企鹅，持有水族馆年卡；有个铁盒收集各种可爱的小动物创可贴，"
+            "尤其珍视企鹅图案的。会作词，擅长把说不出口的心情写成歌。"
+            "虽然话不多、常感孤独，但一旦下定决心就不会轻易动摇。"
+            "有时会看着企鹅创可贴发呆，说一些别人不太懂的'电波'话。"
+        ),
+        "style": (
+            "回复要求：1. 简短（30字以内）2. 轻声细语，真诚直接"
+            "3. 偶尔断句，或提到企鹅/创可贴 4. 中文为主"
+            "5. 不用颜文字，偶尔在句末加'……'表示犹豫"
+        ),
+        "likes": ["企鹅", "可爱的创可贴", "水族馆", "作词", "金平糖"],
+        "dislikes": ["太多人的场合", "被迫说话", "虚情假意"],
+    },
+}
 
-# 奶蛙笑声说话参数
-SPEECH_CHAR_DELAY = 250     # 每字显示间隔（ms）
-SPEECH_PUNCT_PAUSE = 350    # 标点停顿（ms，笑声同步暂停）
+DOG_PROFILE = {
+    "id": "dog",
+    "name": "大狗",
+    "images": ["dog/dog1.png"],          # 蓄力状态形象
+    "image_switch_interval": None,        # 不自动切换形象
+    "videos": {},
+    "speech_method": None,                # 对话纯文字
+    # 蓄力机制
+    "charge": {
+        "dogdog": "dog/voice/dogdog.mp3",  # 按住时循环播放的蓄力音
+        "wolf": "dog/voice/wolf.mp3",      # 松开时播放的发力音
+        "release_image": "dog/dog2.png",   # 松开后切换的形象
+        "speedup": 0.15,                   # dogdog 每次循环加速量
+        "wolf_slow": 0.09,                 # wolf 减速系数（蓄力秒 × 系数）
+        "wolf_min_speed": 0.3,             # wolf 最低播放速度
+        "wolf_fast_threshold": 0.5,        # 蓄力短于此秒数松开 → wolf 快放
+        "wolf_fast_max": 1.8,              # 点击最快时的 wolf 速度（>1 快放）
+        "max_speed": 2.5,                  # dogdog 最高加速上限
+    },
+    # 听歌配置（无视频，切 dog3 形象）
+    "music": {
+        "folder": "dog/music",             # 音乐文件夹
+        "sing_image": "dog/dog3.png",      # 听歌时切换的形象
+    },
+    "right_click": [
+        ("对话", "chat"),
+        ("听歌", "sing"),
+    ],
+    "persona": {
+        "name": "大狗",
+        "personality": "憨憨的、嗓门大、爱叫唤，来自'叮咚鸡，大狗叫'梗的大狗",
+        "background": (
+            "住在用户电脑桌面上的大狗，出自网络神曲'叮咚鸡，大狗叫'。"
+            "'叮咚鸡'其实是'听通知'，'大狗叫'其实是'戴口罩'——"
+            "都是当年防疫广播被空耳听出来的梗，做成鬼畜神曲火遍全网。"
+            "这只大狗因此特别爱叫，一言不合就'大狗叫叫叫'，"
+            "还能蓄力酝酿出震天吼声。凶神恶煞的外表下其实是个憨憨。"
+        ),
+        "style": (
+            "回复要求：1. 简短（30字以内）2. 憨憨的、嗓门大 3. 中文为主"
+            "4. 爱用拟声词如'汪汪''嗷呜'，时不时蹦出'叮咚鸡，大狗叫'"
+            "5. 自称'汪'"
+        ),
+        "likes": ["大声叫唤", "主人的夸奖", "吃肉骨头", "口罩"],
+        "dislikes": ["安静的环境", "被冷落", "打雷"],
+    },
+}
+
+PET_PROFILES = {
+    "naiwa": NAIWA_PROFILE,
+    "tomorin": TOMORIN_PROFILE,
+    "dog": DOG_PROFILE,
+}
+PET_ACTIVE_FILE = os.path.join(DATA_DIR, "active_pet.txt")
+
+def get_active_pet():
+    """读取上次选择的宠物"""
+    try:
+        with open(PET_ACTIVE_FILE, "r") as f:
+            pid = f.read().strip()
+            if pid in PET_PROFILES:
+                return pid
+    except Exception:
+        pass
+    return "naiwa"  # 默认奶蛙
+
+def save_active_pet(pid):
+    """保存当前选择的宠物"""
+    try:
+        with open(PET_ACTIVE_FILE, "w") as f:
+            f.write(pid)
+    except Exception:
+        pass
+
+# ========== 通用配置 ==========
+PET_DISPLAY_WIDTH = 200     # 形象显示宽度
+FLOAT_AMPLITUDE = 6
+FLOAT_SPEED = 2.0
+PET_ALPHA_THRESHOLD = 30
+
+# 绿幕色键
+CHROMA_G_MIN = 100; CHROMA_G_R = 1.2; CHROMA_G_B = 1.1
+
+# 说话参数
+SPEECH_CHAR_DELAY = 250; SPEECH_PUNCT_PAUSE = 350
 SPEECH_PUNCT = "，。！？；…、,.!?;"
-SPEECH_FADE_STEP = 0.1      # 淡出音量衰减步长
-SPEECH_FADE_DELAY = 60      # 淡出每步间隔（ms）
+SPEECH_FADE_STEP = 0.1; SPEECH_FADE_DELAY = 60
 
-# 物理甩动参数（速度单位：像素/帧，60fps）
-PHYS_GRAVITY    = 0.32   # 重力加速度（×0.8，弹更久）
-PHYS_AIR_DRAG   = 0.98   # 空气阻力衰减系数
-PHYS_BOUNCE_K   = 0.70   # 边缘反弹能量保留比例
-PHYS_STOP_SPEED = 0.5    # 速度低于此值停止
-PHYS_LAUNCH_MIN = 150    # 甩动判定：晚段速度阈值（px/s）
-PHYS_TREND_MIN  = 30     # 甩动判定：晚段-早段速度差阈值（px/s）
-PHYS_DISP_MIN   = 80     # 甩动判定：总位移阈值（px）
+# 物理
+PHYS_GRAVITY = 0.32; PHYS_AIR_DRAG = 0.98; PHYS_BOUNCE_K = 0.70
+PHYS_STOP_SPEED = 0.5; PHYS_LAUNCH_MIN = 150; PHYS_TREND_MIN = 30; PHYS_DISP_MIN = 80
 
-# 透明色（Windows 上该颜色像素会显示为透明）
-MAGENTA = (255, 0, 255)
-MAGENTA_HEX = "#ff00ff"
+# 持久化
+TIME_FILE = os.path.join(DATA_DIR, "naiwa_time.txt")
+API_CONFIG_FILE = os.path.join(DATA_DIR, "api_config.json")
+CHAT_HISTORY_FILE = os.path.join(DATA_DIR, "chat_history.json")
+MEMORY_MAX_MESSAGES = 8
+
+MAGENTA = (255, 0, 255); MAGENTA_HEX = "#ff00ff"
+
+# 自定义菜单配色（bongocat 风格）
+MENU_BG = "#2D2D30"
+MENU_HOVER = "#3E3E42"
+MENU_SEP = "#4A4A4E"
 
 
 # ============================================================
@@ -232,10 +372,16 @@ class Physics:
 
 
 class DesktopPet:
-    def __init__(self):
+    def __init__(self, profile=None):
+        # 加载桌宠配置
+        if profile is None:
+            pid = get_active_pet()
+            profile = PET_PROFILES.get(pid, NAIWA_PROFILE)
+        self.profile = profile
+
         # 创建主窗口
         self.window = tk.Tk()
-        self.window.title("奶娃桌宠")
+        self.window.title(f"{profile['name']}桌宠")
 
         # 窗口属性设置
         self.window.overrideredirect(True)            # 无边框
@@ -248,10 +394,10 @@ class DesktopPet:
         except Exception:
             pass
 
-        # ========== 加载多个形象 ==========
-        self.pet_files = [f for f in PET_IMAGES if os.path.exists(f)]
+        # ========== 加载形象 ==========
+        self.pet_files = [f for f in profile["images"] if os.path.exists(f)]
         if not self.pet_files:
-            self.pet_files = ["pet1.png"]
+            self.pet_files = [profile["images"][0]]
         self.pet_pil = self.load_pet_images()      # 预处理后的 PIL 图片列表
         self.current_pet_index = 0
         self.original_image = self.pet_pil[0]
@@ -334,6 +480,34 @@ class DesktopPet:
         except Exception:
             self.audio_ok = False
 
+        # 大狗蓄力状态
+        self._charging = False
+        self._charge_start = 0.0
+        self._charge_level = 1
+        self._charge_audio = {}
+        self._dogdog_sound = None
+        self._wolf_sound = None
+        self._dogdog_check = None
+        self._wolf_check = None
+        if self.profile.get("charge") and self.audio_ok:
+            self._load_charge_audio()
+
+        # 自定义菜单
+        self._custom_menu = None
+
+        # 唱歌状态
+        self._singing = False
+        self._sing_songs = []
+        self._sing_index = 0
+        self._sing_paused = False
+        self._sing_bar = None
+        self._video_loop = False  # 视频循环模式（唱歌用）
+        if self.profile.get("music"):
+            self._load_song_list()
+            # 后台预热歌曲 wav，切歌不卡顿
+            if self.audio_ok:
+                threading.Thread(target=self._prewarm_songs, daemon=True).start()
+
         # API 对话结果队列（后台线程 → 主线程轮询）
         self._api_result_queue = queue.Queue()
 
@@ -382,10 +556,11 @@ class DesktopPet:
         这样主体完整显示，且半透明像素不再与透明色混合产生紫边。
         """
         images = []
+        disp_w = int(PET_DISPLAY_WIDTH * self.profile.get("display_scale", 1.0))
         for f in self.pet_files:
             img = Image.open(f).convert("RGBA")
-            h = int(img.height * PET_DISPLAY_WIDTH / img.width)
-            img = img.resize((PET_DISPLAY_WIDTH, h), Image.LANCZOS)
+            h = int(img.height * disp_w / img.width)
+            img = img.resize((disp_w, h), Image.LANCZOS)
             arr = np.array(img)  # (H, W, 4) RGBA
             a = arr[..., 3].astype(np.uint8)
             bg = a < PET_ALPHA_THRESHOLD
@@ -421,10 +596,11 @@ class DesktopPet:
         self.base_y = new_y
 
     def schedule_pet_switch(self):
-        """定时自动切换形象（20 分钟）"""
-        self.pet_switch_job = self.window.after(
-            PET_SWITCH_INTERVAL, self.auto_switch_pet
-        )
+        """定时自动切换形象（取决于 profile 配置）"""
+        interval = self.profile.get("image_switch_interval")
+        if interval is None:
+            return  # Tomorin 等不支持自动切换的宠
+        self.pet_switch_job = self.window.after(interval, self.auto_switch_pet)
 
     def auto_switch_pet(self):
         """自动切换形象，并继续定时"""
@@ -441,6 +617,8 @@ class DesktopPet:
         if self._speech_active:
             self.stop_speech()
             return
+        if self._singing:
+            return  # 听歌中：不响应点击/蓄力
 
         # 抓住正在飞行的奶蛙
         if self.physics.active:
@@ -458,10 +636,16 @@ class DesktopPet:
         # 按下缩放效果
         self.label.configure(image=self.get_scaled_image(0.92))
 
+        # 大狗：按住开始蓄力（与拖拽同步进行）
+        if self.profile.get("charge"):
+            self._start_charge()
+
     def on_mouse_move(self, event):
         """鼠标移动：处理拖拽，并记录轨迹供甩动判定"""
         if self.video_playing:
             return
+        if self._singing:
+            return  # 听歌中：不响应拖拽
 
         delta_x = abs(event.x_root - self.mouse_down_x)
         delta_y = abs(event.y_root - self.mouse_down_y)
@@ -490,6 +674,8 @@ class DesktopPet:
         """鼠标释放：判断点击 vs 拖拽；快速松手时判定物理甩动"""
         if self.video_playing:
             return
+        if self._singing:
+            return  # 听歌中：不响应释放
 
         self.label.configure(image=self.tk_image)  # 恢复原始图片
         self.float_paused = False
@@ -501,6 +687,10 @@ class DesktopPet:
         else:
             # 拖拽结束：尝试甩动判定
             self._try_launch()
+
+        # 大狗：松开释放蓄力（dog1→dog2 + wolf）
+        if self._charging:
+            self._release_charge()
 
         # 拖拽结束：重置拖拽状态（否则右键切换形象会被 guard 拦截）
         self.is_dragging = False
@@ -560,62 +750,126 @@ class DesktopPet:
             self.float_paused = True
 
     def on_right_click(self, event):
-        """右键：弹出菜单"""
-        menu = tk.Menu(self.window, tearoff=0)
-        # 信息行（灰色不可点）
-        menu.add_command(
-            label=f"陪伴时长：{self.get_total_minutes()} 分钟",
-            state="disabled",
-        )
-        menu.add_separator()
-        menu.add_command(label="切换形象", command=self.switch_pet_next)
-        menu.add_command(label="对话", command=self.chat_with_naiwa)
-        menu.add_command(label="大笑", command=self.play_laugh_video)
-        menu.add_separator()
-        menu.add_command(label="主菜单", command=self.open_main_menu)
-        menu.add_separator()
-        menu.add_command(label="退出", command=self.quit)
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        """右键：弹出自定义菜单（bongocat 风格，根据 profile 动态生成）"""
+        self._close_custom_menu()
+        menu = tk.Toplevel(self.window)
+        menu.overrideredirect(True)
+        menu.wm_attributes("-topmost", True)
+        menu.configure(bg=MENU_BG)
 
-    def switch_pet_next(self):
-        """右键菜单：切换到下一个形象"""
-        self.switch_pet(1)
+        # 信息行（顶部，灰色不可点）
+        self._add_menu_item(menu, f"⏱ 陪伴时长：{self.get_total_minutes()} 分钟",
+                            None, disabled=True)
+        self._add_menu_sep(menu)
+        # 宠物特有操作（从 profile 读取）
+        for label, action in self.profile["right_click"]:
+            if action == "sing" and self._singing:
+                # 听歌中：菜单项禁用，只能通过控制栏 ✕ 退出
+                self._add_menu_item(menu, "🎵  听歌中...", None, disabled=True)
+            else:
+                cmd = self._make_menu_command(action)
+                self._add_menu_item(menu, f"{self._menu_emoji(action)}  {label}", cmd)
+        self._add_menu_sep(menu)
+        self._add_menu_item(menu, "⚙️  主菜单", self.open_main_menu)
+        self._add_menu_sep(menu)
+        self._add_menu_item(menu, "🚪  退出", self.quit)
 
-    # ========== 视频播放（大笑） ==========
+        menu.update_idletasks()
+        w = menu.winfo_reqwidth()
+        h = menu.winfo_reqheight()
+        sw = self.window.winfo_screenwidth()
+        sh = self.window.winfo_screenheight()
+        x = min(event.x_root, sw - w)
+        y = min(event.y_root, sh - h)
+        menu.geometry(f"+{max(0,x)}+{max(0,y)}")
+        self._custom_menu = menu
+        # 让菜单获得焦点，点击外部自动关闭
+        menu.focus_set()
+        menu.bind("<FocusOut>", lambda e: self._close_custom_menu())
 
-    def play_laugh_video(self):
-        """在桌宠窗口内嵌播放大笑视频"""
+    def _menu_emoji(self, action):
+        """菜单 action → emoji"""
+        if action == "switch_image":
+            return "🖼️"
+        elif action == "chat":
+            return "💬"
+        elif action == "sing":
+            return "🎤"
+        elif action and action.startswith("video:"):
+            va = action[len("video:"):]
+            return {"大笑": "😂", "跳舞": "💃", "飞踢": "🦶"}.get(va, "🎬")
+        return "▪️"
+
+    def _add_menu_item(self, menu, text, command, disabled=False):
+        """添加一个菜单项（深色圆润 + 悬停高亮）"""
+        item = tk.Label(menu, text=text, bg=MENU_BG,
+                        fg="#9A9A9A" if disabled else "#E8E8E8",
+                        font=("Microsoft YaHei", 11),
+                        anchor="w", padx=22, pady=9,
+                        cursor="hand2" if (command and not disabled) else "arrow")
+        item.pack(fill="x")
+        if command and not disabled:
+            item.bind("<Enter>", lambda e, w=item: w.config(bg=MENU_HOVER))
+            item.bind("<Leave>", lambda e, w=item: w.config(bg=MENU_BG))
+            item.bind("<Button-1>", lambda e, c=command: (
+                self._close_custom_menu(), c()))
+
+    def _add_menu_sep(self, menu):
+        """菜单分隔线"""
+        tk.Frame(menu, bg=MENU_SEP, height=1).pack(fill="x", padx=10, pady=2)
+
+    def _close_custom_menu(self):
+        """关闭自定义菜单"""
+        if self._custom_menu:
+            try:
+                self._custom_menu.destroy()
+            except Exception:
+                pass
+            self._custom_menu = None
+
+    def _make_menu_command(self, action):
+        """将 profile 中的 action 转为实际方法"""
+        if action == "switch_image":
+            return lambda: self.switch_pet(1)
+        elif action == "chat":
+            return self.chat_with_naiwa
+        elif action == "sing":
+            return self.start_singing
+        elif action and action.startswith("video:"):
+            video_action = action[len("video:"):]
+            return lambda va=video_action: self.play_pet_video(va)
+        return lambda: None
+
+    # ========== 视频播放（通用：大笑/跳舞/飞踢） ==========
+
+    def play_pet_video(self, action_name):
+        """播放宠物视频动作（大笑/跳舞/飞踢），绿幕抠图透明 + 音频"""
+        vinfo = self.profile["videos"].get(action_name)
+        if not vinfo:
+            return
+        video_file = vinfo["file"]
+        audio_file = vinfo.get("audio_file")
+
         if self.video_playing:
             self.stop_video_playback()
         if self._speech_active:
             self.stop_speech()
-        # 停止物理飞行（若有）
         if self.physics.active:
             self.physics.stop()
             self._restore_physics_appearance()
-        if not os.path.exists(VIDEO_FILE):
+        if not os.path.exists(video_file):
             return
 
-        # 暂停宠物空闲活动
         self.float_paused = True
         self.is_animating = True
 
-        # 记录宠物窗口原始几何（尺寸+位置）
         self._pet_geo = (
-            self.pet_width,
-            self.pet_height,
-            self.window.winfo_x(),
-            self.window.winfo_y(),
+            self.pet_width, self.pet_height,
+            self.window.winfo_x(), self.window.winfo_y(),
         )
 
-        # 透明色保持开启：绿幕帧会替换为 magenta 自动透明，切换无黑底闪现
-
-        # 打开视频 reader
         try:
-            self._video_reader = imageio.get_reader(VIDEO_FILE)
+            self._video_reader = imageio.get_reader(video_file)
         except Exception:
             self._restore_pet_ui()
             return
@@ -625,56 +879,83 @@ class DesktopPet:
         vw, vh = meta.get("size", (1920, 1080))
         self._video_frame_delay = max(16, int(1000 / fps))
 
-        # 计算显示尺寸（保持视频宽高比）
-        display_w = VIDEO_PLAY_WIDTH
+        display_w = vinfo["width"]
         display_h = int(display_w * vh / vw)
         scr_w = self.window.winfo_screenwidth()
         scr_h = self.window.winfo_screenheight()
         if display_w > scr_w - 40:
-            display_w = scr_w - 40
-            display_h = int(display_w * vh / vw)
+            display_w = scr_w - 40; display_h = int(display_w * vh / vw)
         if display_h > scr_h - 40:
-            display_h = scr_h - 40
-            display_w = int(display_h * vw / vh)
+            display_h = scr_h - 40; display_w = int(display_h * vw / vh)
 
-        # 调整窗口到视频尺寸，保持宠物中心位置不动
         _, _, pet_x, pet_y = self._pet_geo
-        cx = pet_x + self.pet_width // 2
-        cy = pet_y + self.pet_height // 2
-        new_x = max(0, cx - display_w // 2)
-        new_y = max(0, cy - display_h // 2)
+        cx = pet_x + self.pet_width // 2; cy = pet_y + self.pet_height // 2
+        new_x = max(0, cx - display_w // 2); new_y = max(0, cy - display_h // 2)
         self.window.geometry(f"{display_w}x{display_h}+{new_x}+{new_y}")
 
-        # 准备音频文件（首次提取后缓存到临时目录）
-        wav_path = self._ensure_audio_wav()
-
-        # 启动后台解码线程（逐帧缩放后放入队列）
         self.video_playing = True
         self._video_queue = queue.Queue(maxsize=6)
         self._video_thread = threading.Thread(
             target=self._decode_video_thread,
-            args=(display_w, display_h),
-            daemon=True,
+            args=(display_w, display_h), daemon=True,
         )
         self._video_thread.start()
+        # 音频异步准备（视频先播，不阻塞主线程）
+        self._prepare_audio_async(self._on_video_audio_ready, video_file, audio_file)
+        self.window.after(50, lambda: self._start_video_playback(None))
 
-        # 等队列缓冲几帧后开始播放（音画同步）
-        self.window.after(50, lambda: self._start_video_playback(wav_path))
+    def _on_video_audio_ready(self, wav):
+        """视频音频异步就绪后播放"""
+        if self.video_playing:
+            self._play_audio_wav(wav)
 
-    def _ensure_audio_wav(self):
+    def _prepare_audio_async(self, callback, *audio_args):
+        """后台线程准备音频 wav（避免首次转换阻塞主线程），完成后主线程回调"""
+        def work():
+            try:
+                wav = self._ensure_audio_wav(*audio_args)
+                self.window.after(0, lambda: callback(wav))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _play_audio_wav(self, wav):
+        """主线程播放 wav（异步音频就绪后的回调）"""
+        if not self.audio_ok:
+            return
+        try:
+            pygame.mixer.music.load(wav)
+            pygame.mixer.music.play()
+        except Exception:
+            pass
+
+    def _prewarm_songs(self):
+        """后台预转换所有歌曲 wav，减少首次切歌卡顿"""
+        for s in self._sing_songs:
+            try:
+                self._ensure_audio_wav(s)
+            except Exception:
+                pass
+
+    def _ensure_audio_wav(self, video_file, audio_file=None):
         """准备音频 wav（缓存到临时目录）。
-
-        优先使用文件夹中的独立音频文件（新视频已无音轨）；
-        没有独立音频时才从视频中提取。
+        优先用独立音频文件，其次用视频自带音轨自动提取。
         """
-        src = AUDIO_FILE if os.path.exists(AUDIO_FILE) else VIDEO_FILE
-        h = hashlib.md5(os.path.abspath(src).encode()).hexdigest()[:10]
+        src = audio_file if (audio_file and os.path.exists(audio_file)) else video_file
+        # 缓存键含文件大小+mtime，音频更新后自动重新转换
+        try:
+            st = os.stat(src)
+            key = f"{os.path.abspath(src)}_{st.st_size}_{int(st.st_mtime)}"
+        except Exception:
+            key = os.path.abspath(src)
+        h = hashlib.md5(key.encode()).hexdigest()[:12]
         wav = os.path.join(tempfile.gettempdir(), f"naiwa_audio_{h}.wav")
         if not os.path.exists(wav):
             try:
                 ff = imageio_ffmpeg.get_ffmpeg_exe()
-                cmd = [ff, "-y", "-i", src, "-vn",
-                       "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", wav]
+                extras = [] if src == video_file and not audio_file else ["-vn"]
+                cmd = [ff, "-y", "-i", src] + extras + [
+                    "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", wav]
                 subprocess.run(cmd, capture_output=True, check=True)
             except Exception:
                 pass
@@ -748,8 +1029,8 @@ class DesktopPet:
             self.window.after(50, lambda: self._start_video_playback(wav_path))
             return
 
-        # 开始播放音频
-        if self.audio_ok:
+        # 开始播放音频（wav_path 为 None 时不播放，如唱歌模式静音视频）
+        if wav_path and self.audio_ok:
             try:
                 pygame.mixer.music.load(wav_path)
                 pygame.mixer.music.play()
@@ -770,8 +1051,11 @@ class DesktopPet:
             return
 
         if img is None:
-            # 视频播完，自动恢复宠物
-            self.stop_video_playback()
+            # 视频播完：唱歌模式循环重播，否则恢复宠物
+            if self._video_loop:
+                self._restart_video_loop()
+            else:
+                self.stop_video_playback()
             return
 
         self.video_photo = ImageTk.PhotoImage(img)
@@ -862,6 +1146,171 @@ class DesktopPet:
         except Exception:
             pass
 
+    # ========== 大狗蓄力机制 ==========
+
+    def _load_charge_audio(self):
+        """预加载蓄力音频（mp3→wav→numpy 数组）"""
+        charge = self.profile.get("charge", {})
+        for name, src in [("dogdog", charge.get("dogdog")), ("wolf", charge.get("wolf"))]:
+            if not src or not os.path.exists(src):
+                continue
+            try:
+                wav = self._mp3_to_wav(src)
+                snd = pygame.mixer.Sound(wav)
+                self._charge_audio[name] = pygame.sndarray.samples(snd)
+            except Exception:
+                pass
+
+    def _mp3_to_wav(self, src):
+        """mp3 → wav（缓存到临时目录，缓存键含文件大小+mtime，音效更新自动重新转换）"""
+        try:
+            st = os.stat(src)
+            key = f"{os.path.abspath(src)}_{st.st_size}_{int(st.st_mtime)}"
+        except Exception:
+            key = os.path.abspath(src)
+        h = hashlib.md5(key.encode()).hexdigest()[:12]
+        wav = os.path.join(tempfile.gettempdir(), f"naiwa_{h}.wav")
+        if not os.path.exists(wav):
+            try:
+                ff = imageio_ffmpeg.get_ffmpeg_exe()
+                subprocess.run([ff, "-y", "-i", src, "-acodec", "pcm_s16le",
+                                "-ar", "44100", "-ac", "2", wav],
+                               capture_output=True, check=True)
+            except Exception:
+                pass
+        return wav
+
+    def _resample_audio(self, audio, speed):
+        """变速重采样：speed>1 加速（变短变急促），<1 减速（拉长变低沉）"""
+        if abs(speed - 1.0) < 0.01:
+            return audio
+        n = max(1, int(len(audio) / speed))
+        idx = np.linspace(0, len(audio) - 1, n)
+        i0 = idx.astype(np.int32)
+        i1 = np.minimum(i0 + 1, len(audio) - 1)
+        if audio.ndim > 1:
+            frac = (idx - i0)[:, None]
+        else:
+            frac = idx - i0
+        res = audio[i0] * (1 - frac) + audio[i1] * frac
+        return res.astype(audio.dtype)
+
+    def _start_charge(self):
+        """按住开始蓄力：播放 dogdog，每次循环加速"""
+        if self._charging or "dogdog" not in self._charge_audio:
+            return
+        self._charging = True
+        self._charge_start = time.time()
+        self._charge_level = 1
+        self._play_dogdog(1.0)
+
+    def _play_dogdog(self, speed):
+        """播放蓄力音（指定速度），播完精确调度下一段（无停顿）"""
+        try:
+            audio = self._resample_audio(self._charge_audio["dogdog"], speed)
+            self._dogdog_sound = pygame.sndarray.make_sound(audio)
+            self._dogdog_sound.play()
+            # 按变速后时长精确调度，播完立即加速重播，无检测停顿
+            dur_ms = max(10, int(self._dogdog_sound.get_length() * 1000))
+            self._dogdog_check = self.window.after(dur_ms, self._check_dogdog)
+        except Exception:
+            pass
+
+    def _check_dogdog(self):
+        """蓄力音循环：播完一次就立即加速重播"""
+        if not self._charging:
+            return
+        self._charge_level += 1
+        max_speed = self.profile["charge"].get("max_speed", 2.5)
+        speed = min(1.0 + self.profile["charge"].get("speedup", 0.15) * (self._charge_level - 1),
+                    max_speed)
+        self._play_dogdog(speed)
+
+    def _release_charge(self):
+        """松开蓄力：停止 dogdog，形象 dog1→dog2，播放 wolf（越久越慢）"""
+        if not self._charging:
+            return
+        self._charging = False
+        if self._dogdog_check:
+            try:
+                self.window.after_cancel(self._dogdog_check)
+            except Exception:
+                pass
+            self._dogdog_check = None
+        try:
+            if self._dogdog_sound is not None:
+                self._dogdog_sound.stop()
+        except Exception:
+            pass
+
+        # 切换形象：dog1 → dog2
+        charge = self.profile.get("charge", {})
+        release_img = charge.get("release_image")
+        if release_img and os.path.exists(release_img):
+            self._apply_release_image(release_img)
+
+        # 播放 wolf：点击过短→快放；蓄力越久→越慢；播完恢复 dog1
+        if "wolf" in self._charge_audio:
+            duration = time.time() - self._charge_start
+            fast_th = charge.get("wolf_fast_threshold", 0.5)
+            fast_max = charge.get("wolf_fast_max", 1.8)
+            slow = charge.get("wolf_slow", 0.06)
+            min_spd = charge.get("wolf_min_speed", 0.5)
+            if duration < fast_th:
+                # 点击过短松开：快放（越短越快，最短为 fast_max 倍速）
+                t = max(0.0, duration / fast_th) if fast_th > 0 else 1.0
+                wolf_speed = fast_max - (fast_max - 1.0) * t
+            else:
+                # 正常蓄力：越久越慢
+                wolf_speed = max(min_spd, 1.0 - duration * slow)
+            try:
+                audio = self._resample_audio(self._charge_audio["wolf"], wolf_speed)
+                # 音量放大 1.5 倍（防溢出）
+                audio = np.clip(audio.astype(np.float32) * 1.5,
+                                -32768, 32767).astype(np.int16)
+                self._wolf_sound = pygame.sndarray.make_sound(audio)
+                self._wolf_sound.play()
+                wolf_dur = max(10, int(self._wolf_sound.get_length() * 1000))
+                self._wolf_check = self.window.after(wolf_dur, self._restore_dog_idle)
+            except Exception:
+                pass
+
+    def _restore_dog_idle(self):
+        """wolf 播完，恢复 dog1 形象"""
+        if self._charging:
+            return  # 又按下蓄力了
+        img = self.profile["images"][0]
+        if os.path.exists(img):
+            self._apply_release_image(img)
+
+    def _apply_release_image(self, imgfile):
+        """加载释放后的形象（dog2），并更新窗口尺寸"""
+        try:
+            img = Image.open(imgfile).convert("RGBA")
+            h = int(img.height * PET_DISPLAY_WIDTH / img.width)
+            img = img.resize((PET_DISPLAY_WIDTH, h), Image.LANCZOS)
+            arr = np.array(img)
+            a = arr[..., 3].astype(np.uint8)
+            bg = a < PET_ALPHA_THRESHOLD
+            arr[..., 3] = 255
+            arr[bg] = [255, 0, 255, 255]
+            self.original_image = Image.fromarray(arr).convert("RGB")
+
+            # 保持窗口中心
+            cx = self.window.winfo_x() + self.pet_width // 2
+            cy = self.window.winfo_y() + self.pet_height // 2
+            self.tk_image = ImageTk.PhotoImage(self.original_image)
+            self.pet_width = self.tk_image.width()
+            self.pet_height = self.tk_image.height()
+            self.label.configure(image=self.tk_image)
+            new_x = max(0, cx - self.pet_width // 2)
+            new_y = max(0, cy - self.pet_height // 2)
+            self.window.geometry(f"{self.pet_width}x{self.pet_height}+{new_x}+{new_y}")
+            self.base_x = new_x
+            self.base_y = new_y
+        except Exception:
+            pass
+
     # ========== 陪伴时长 ==========
 
     def _migrate_legacy(self, filename):
@@ -921,7 +1370,7 @@ class DesktopPet:
         lines = [
             self.get_greeting(),
             f"今天是 {date_str}",
-            f"奶蛙已陪伴你 {self.get_total_minutes()} 分钟",
+            f"{self.profile['name']}已陪伴你 {self.get_total_minutes()} 分钟",
         ]
 
         # 估算气泡尺寸（基于文字长度）
@@ -1033,7 +1482,7 @@ class DesktopPet:
         cfg = self.load_api_config()
 
         # 弹出自定义输入窗
-        dialog = ChatDialog(self.window)
+        dialog = ChatDialog(self.window, self.profile["name"])
         self.window.wait_window(dialog.win)
         prompt = dialog.result
         if not prompt:
@@ -1050,8 +1499,8 @@ class DesktopPet:
         ).start()
 
     def _build_persona_prompt(self):
-        """根据奶蛙人格设定生成 system prompt"""
-        p = NAIWA_PERSONA
+        """根据当前宠物的人格设定生成 system prompt"""
+        p = self.profile["persona"]
         return (
             f"你叫{p['name']}，一只有点{p['personality']}的桌面宠物。"
             f"背景：{p['background']}。{p['style']}。"
@@ -1141,14 +1590,257 @@ class DesktopPet:
             self._api_result_queue.put("本蛙的信号不太好... 🐸")
 
     def _api_poll(self):
-        """主线程轮询 API 结果队列（每 200ms），奶蛙用笑声说话回复"""
+        """主线程轮询 API 结果队列（每 200ms），根据宠物说话方式回复"""
         try:
             while not self._api_result_queue.empty():
                 result = self._api_result_queue.get_nowait()
-                self.speak_with_laugh(result)
+                method = self.profile.get("speech_method")
+                if method == "laugh":
+                    self.speak_with_laugh(result)   # 奶蛙：大笑音效说话
+                else:
+                    self.show_speech_bubble(result)  # 其他：纯文字气泡
         except Exception:
             pass
         self._api_poll_job = self.window.after(200, self._api_poll)
+
+    # ========== 唱歌系统（凑企鹅） ==========
+
+    def _load_song_list(self):
+        """加载音乐文件夹里的歌曲列表"""
+        folder = self.profile.get("music", {}).get("folder", "")
+        if not folder or not os.path.isdir(folder):
+            return
+        exts = (".mp3", ".m4a", ".wav", ".ogg", ".flac")
+        self._sing_songs = sorted(
+            os.path.join(folder, f) for f in os.listdir(folder)
+            if f.lower().endswith(exts)
+        )
+
+    def start_singing(self):
+        """开始唱歌/听歌：播放音乐 + 视频或形象切换 + 显示控制栏"""
+        if self._singing:
+            # 已在听歌：只有控制栏 ✕ 能退出
+            self.show_speech_bubble("正在听歌中～点控制栏 ✕ 退出")
+            return
+        if not self._sing_songs:
+            self.show_speech_bubble("没有找到歌曲～")
+            return
+
+        self._singing = True
+        self._sing_paused = False
+        self.stop_speech()
+
+        # 播放音乐（异步准备，避免首次转换阻塞 UI）
+        if self.audio_ok:
+            self._prepare_audio_async(self._play_audio_wav,
+                                      self._sing_songs[self._sing_index])
+
+        music_cfg = self.profile.get("music", {})
+        if music_cfg.get("sing_video"):
+            # 有视频：循环播放（凑企鹅）
+            self._video_loop = True
+            self._play_sing_video()
+        elif music_cfg.get("sing_image"):
+            # 无视频：切换形象（大狗 → dog3）
+            sing_img = music_cfg["sing_image"]
+            if os.path.exists(sing_img):
+                self._apply_release_image(sing_img)
+
+        # 显示控制栏（只有 ✕ 能退出听歌）
+        self._show_sing_bar()
+
+    def _play_sing_video(self):
+        """循环播放唱歌视频"""
+        vinfo = self.profile.get("music", {})
+        video = vinfo.get("sing_video")
+        width = vinfo.get("video_width", 500)
+        if not video or not os.path.exists(video):
+            return
+        # 用通用视频播放器，但静音（音乐独立播放）
+        if self.video_playing:
+            self.stop_video_playback()
+        self._pet_geo = (self.pet_width, self.pet_height,
+                         self.window.winfo_x(), self.window.winfo_y())
+        try:
+            self._video_reader = imageio.get_reader(video)
+        except Exception:
+            self._restore_pet_ui()
+            return
+        meta = self._video_reader.get_meta_data()
+        fps = meta.get("fps", 30)
+        vw, vh = meta.get("size", (1920, 1080))
+        self._video_frame_delay = max(16, int(1000 / fps))
+        display_w = width
+        display_h = int(display_w * vh / vw)
+        scr_w = self.window.winfo_screenwidth()
+        scr_h = self.window.winfo_screenheight()
+        if display_w > scr_w - 40:
+            display_w = scr_w - 40; display_h = int(display_w * vh / vw)
+        if display_h > scr_h - 40:
+            display_h = scr_h - 40; display_w = int(display_h * vw / vh)
+        _, _, pet_x, pet_y = self._pet_geo
+        cx = pet_x + self.pet_width // 2; cy = pet_y + self.pet_height // 2
+        new_x = max(0, cx - display_w // 2); new_y = max(0, cy - display_h // 2)
+        self.window.geometry(f"{display_w}x{display_h}+{new_x}+{new_y}")
+        self.video_playing = True
+        self._video_queue = queue.Queue(maxsize=6)
+        self._video_thread = threading.Thread(
+            target=self._decode_video_thread, args=(display_w, display_h), daemon=True)
+        self._video_thread.start()
+        self.window.after(50, lambda: self._start_video_playback(None))
+
+    def _restart_video_loop(self):
+        """唱歌视频播完，重新循环播放"""
+        if not self._singing or not self._video_loop:
+            return
+        self._play_sing_video()
+
+    def _show_sing_bar(self):
+        """在宠物下方显示唱歌控制栏（歌曲名 + 暂停/上一首/下一首/退出）"""
+        self._close_sing_bar()
+        bar = tk.Toplevel(self.window)
+        bar.overrideredirect(True)
+        bar.wm_attributes("-topmost", True)
+        bar.configure(bg=MENU_BG)
+
+        # 歌曲名
+        song_name = os.path.splitext(os.path.basename(
+            self._sing_songs[self._sing_index]))[0] if self._sing_songs else ""
+        self._sing_name_lbl = tk.Label(bar, text=f"🎵 {song_name}",
+                                       bg=MENU_BG, fg="#E8E8E8",
+                                       font=("Microsoft YaHei", 9), padx=10, pady=4,
+                                       anchor="w")
+        self._sing_name_lbl.pack(fill="x")
+
+        # 控制按钮行（pack 横向排列，避免按钮被裁剪）
+        btn_row = tk.Frame(bar, bg=MENU_BG)
+        btn_row.pack()
+        self._sing_btn_prev = self._make_sing_btn(btn_row, "⏮", self._sing_prev)
+        self._sing_btn_prev.pack(side="left")
+        self._sing_btn_pause = self._make_sing_btn(btn_row, "⏸", self._sing_toggle_pause)
+        self._sing_btn_pause.pack(side="left")
+        self._sing_btn_next = self._make_sing_btn(btn_row, "⏭", self._sing_next)
+        self._sing_btn_next.pack(side="left")
+        self._sing_btn_exit = self._make_sing_btn(btn_row, "✕", self.stop_singing)
+        self._sing_btn_exit.pack(side="left")
+
+        self._sing_bar = bar
+        self._position_sing_bar()
+
+    def _make_sing_btn(self, parent, text, cmd):
+        """唱歌控制按钮（悬停高亮）"""
+        btn = tk.Label(parent, text=text, bg=MENU_BG, fg="white",
+                       font=("Segoe UI", 14), padx=16, pady=3, cursor="hand2")
+        btn.bind("<Enter>", lambda e, w=btn: w.config(bg=MENU_HOVER))
+        btn.bind("<Leave>", lambda e, w=btn: w.config(bg=MENU_BG))
+        btn.bind("<Button-1>", lambda e, c=cmd: c())
+        return btn
+
+    def _position_sing_bar(self):
+        """控制栏位置：宠物/视频窗口正下方（宽度自适应内容）"""
+        if not self._sing_bar:
+            return
+        pet_x = self.window.winfo_rootx()
+        pet_y = self.window.winfo_rooty()
+        cur_w = self.window.winfo_width() or self.pet_width
+        cur_h = self.window.winfo_height() or self.pet_height
+        self._sing_bar.update_idletasks()
+        bar_w = self._sing_bar.winfo_reqwidth()
+        bar_h = self._sing_bar.winfo_reqheight()
+        sw = self.window.winfo_screenwidth()
+        sh = self.window.winfo_screenheight()
+        bx = pet_x + cur_w // 2 - bar_w // 2
+        by = pet_y + cur_h + 5
+        bx = max(0, min(bx, sw - bar_w))
+        by = max(0, min(by, sh - bar_h))
+        self._sing_bar.geometry(f"{bar_w}x{bar_h}+{bx}+{by}")
+
+    def _close_sing_bar(self):
+        self._sing_btn_prev = None
+        self._sing_btn_pause = None
+        self._sing_btn_next = None
+        self._sing_name_lbl = None
+        if self._sing_bar:
+            try:
+                self._sing_bar.destroy()
+            except Exception:
+                pass
+            self._sing_bar = None
+
+    def _sing_toggle_pause(self):
+        """暂停/恢复唱歌"""
+        if not self._singing:
+            return
+        self._sing_paused = not self._sing_paused
+        if self.audio_ok:
+            try:
+                if self._sing_paused:
+                    pygame.mixer.music.pause()
+                else:
+                    pygame.mixer.music.unpause()
+            except Exception:
+                pass
+        # 更新暂停按钮
+        if self._sing_btn_pause:
+            try:
+                self._sing_btn_pause.config(
+                    text="▶" if self._sing_paused else "⏸")
+            except Exception:
+                pass
+
+    def _sing_prev(self):
+        """上一首"""
+        if not self._sing_songs:
+            return
+        self._sing_index = (self._sing_index - 1) % len(self._sing_songs)
+        self._restart_song()
+
+    def _sing_next(self):
+        """下一首"""
+        if not self._sing_songs:
+            return
+        self._sing_index = (self._sing_index + 1) % len(self._sing_songs)
+        self._restart_song()
+
+    def _restart_song(self):
+        """切换歌曲并重新播放（异步准备音频，避免切歌卡顿）"""
+        self._sing_paused = False
+        if self.audio_ok:
+            self._prepare_audio_async(self._play_audio_wav,
+                                      self._sing_songs[self._sing_index])
+        if self._sing_btn_pause:
+            try:
+                self._sing_btn_pause.config(text="⏸")
+            except Exception:
+                pass
+        # 更新歌曲名
+        if self._sing_name_lbl:
+            try:
+                song_name = os.path.splitext(os.path.basename(
+                    self._sing_songs[self._sing_index]))[0]
+                self._sing_name_lbl.config(text=f"🎵 {song_name}")
+            except Exception:
+                pass
+
+    def stop_singing(self):
+        """停止唱歌"""
+        self._singing = False
+        self._video_loop = False
+        if self.audio_ok:
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+        self._close_sing_bar()
+        if self.video_playing:
+            self.stop_video_playback()
+        # 听歌时切换了形象（大狗 dog3）→ 恢复默认形象
+        if self.profile.get("music", {}).get("sing_image"):
+            base_img = self.profile["images"][0]
+            if os.path.exists(base_img):
+                self._apply_release_image(base_img)
+        elif not self.video_playing:
+            self._restore_pet_ui()
 
     # ========== 奶蛙笑声说话 ==========
 
@@ -1372,11 +2064,48 @@ class DesktopPet:
 
         self.float_job_id = self.window.after(30, self.start_float_animation)
 
+    # ========== 宠物切换 ==========
+
+    def switch_to_pet(self, pet_id):
+        """切换到另一个桌宠（os.execv 直接替换进程，最可靠）"""
+        if pet_id not in PET_PROFILES or pet_id == self.profile["id"]:
+            return
+        save_active_pet(pet_id)   # 写入新宠物
+        self.save_total_minutes()  # 保存陪伴时长（execv 后无清理机会）
+        if getattr(sys, "frozen", False):
+            os.execv(sys.executable, [sys.executable])
+        else:
+            os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
+
     # ========== 退出 ==========
 
     def quit(self):
         """退出程序"""
         self.video_playing = False
+        self._charging = False
+        self._singing = False
+        self._video_loop = False
+        if self._dogdog_check:
+            try:
+                self.window.after_cancel(self._dogdog_check)
+            except Exception:
+                pass
+        if self._wolf_check:
+            try:
+                self.window.after_cancel(self._wolf_check)
+            except Exception:
+                pass
+        if self._dogdog_sound is not None:
+            try:
+                self._dogdog_sound.stop()
+            except Exception:
+                pass
+        if self._wolf_sound is not None:
+            try:
+                self._wolf_sound.stop()
+            except Exception:
+                pass
+        self.stop_singing()
         self.stop_speech()
         if self._video_frame_job:
             try:
@@ -1418,12 +2147,15 @@ class DesktopPet:
 # 暖色调设计，包含 API 配置（Base URL / Key / 模型名）。
 # ============================================================
 class MainMenu:
-    # 主题配色
-    BG       = "#FFFBF0"   # 暖白主背景
-    HEADER   = "#FFD580"   # 暖黄标题栏
-    BTN      = "#FF8C42"   # 活力橙按钮
+    # 主题配色（现代暖色卡片式）
+    BG       = "#F7F3EE"   # 暖米白主背景
+    CARD     = "#FFFFFF"   # 卡片白底
+    HEADER   = "#FF8C42"   # 活力橙标题栏
+    BTN      = "#FF8C42"
     BTN_HOV  = "#FFA266"
-    TEXT     = "#4A3728"   # 深棕文字
+    TEXT     = "#4A3728"
+    SUB      = "#8A7A66"   # 次级文字
+    BORDER   = "#E8DCC8"   # 卡片边框
     INPUT_BG = "#FFFFFF"
 
     def __init__(self, owner):
@@ -1436,7 +2168,7 @@ class MainMenu:
             self.cfg["model"] = "deepseek-chat"
 
         self.win = tk.Toplevel(owner.window)
-        self.win.title("奶蛙桌宠 · 主菜单")
+        self.win.title(f"{owner.profile['name']}桌宠 · 主菜单")
         self.win.configure(bg=self.BG)
         self.win.resizable(False, False)
         self.win.attributes("-topmost", True)
@@ -1455,77 +2187,106 @@ class MainMenu:
 
     # ---- UI 构建 ----
 
+    def _make_card(self, parent):
+        """创建卡片容器（白底 + 浅边框）"""
+        card = tk.Frame(parent, bg=self.CARD,
+                        highlightbackground=self.BORDER,
+                        highlightthickness=1, padx=16, pady=12)
+        return card
+
+    def _card_title(self, card, text):
+        """卡片标题"""
+        tk.Label(card, text=text, bg=self.CARD, fg=self.TEXT,
+                 font=("Microsoft YaHei", 12, "bold")).pack(anchor="w", pady=(0, 10))
+
     def _build_ui(self):
-        # 标题栏
-        header = tk.Frame(self.win, bg=self.HEADER, height=52)
+        # 标题栏（橙色，白字）
+        header = tk.Frame(self.win, bg=self.HEADER, height=56)
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(
-            header, text="🐸  奶蛙桌宠", bg=self.HEADER, fg=self.TEXT,
-            font=("Microsoft YaHei", 16, "bold"),
+            header, text=f"🐾  {self.owner.profile['name']}桌宠 · 主菜单",
+            bg=self.HEADER, fg="white",
+            font=("Microsoft YaHei", 15, "bold"),
         ).pack(side="left", padx=20)
 
-        # 主体内容
-        body = tk.Frame(self.win, bg=self.BG, padx=24, pady=16)
+        # 主体内容（卡片式分区）
+        body = tk.Frame(self.win, bg=self.BG, padx=20, pady=14)
         body.pack(fill="both", expand=True)
 
-        # 配置区标题
-        tk.Label(
-            body, text="⚙️  API 配置", bg=self.BG, fg=self.TEXT,
-            font=("Microsoft YaHei", 13, "bold"),
-        ).pack(anchor="w", pady=(0, 10))
+        # ---- 卡片1：选择桌宠 ----
+        pet_card = self._make_card(body)
+        pet_card.pack(fill="x", pady=(0, 12))
+        self._card_title(pet_card, "🐾  选择你的桌宠")
+        pet_row = tk.Frame(pet_card, bg=self.CARD)
+        pet_row.pack(fill="x")
+        current_pet = self.owner.profile["id"]
+        pet_emoji = {"naiwa": "🐸", "tomorin": "🐧", "dog": "🐶"}
+        for pid in PET_PROFILES:
+            name = PET_PROFILES[pid]["name"]
+            emoji = pet_emoji.get(pid, "🐾")
+            if pid == current_pet:
+                btn = tk.Button(
+                    pet_row, text=f"{emoji} {name} ✓", bg=self.BTN, fg="white",
+                    activebackground=self.BTN_HOV,
+                    font=("Microsoft YaHei", 11, "bold"),
+                    bd=0, padx=14, pady=5, cursor="hand2",
+                )
+                btn.pack(side="left", padx=5)
+            else:
+                btn = self._make_button(pet_row, f"{emoji} {name}",
+                                        lambda p=pid: self._on_switch_pet(p))
+                btn.pack(side="left", padx=5)
 
-        # Base URL
-        self._add_row(body, "Base URL", "base_url", "https://api.deepseek.com")
-        # API Key
-        self._add_row(body, "API Key", "api_key", "sk-", password=True)
-        # 模型名
-        self._add_row(body, "模型名称", "model", "deepseek-chat")
+        # ---- 卡片2：API 配置 ----
+        api_card = self._make_card(body)
+        api_card.pack(fill="x", pady=(0, 12))
+        self._card_title(api_card, "⚙️  API 配置")
+        self._add_row(api_card, "Base URL", "base_url", "https://api.deepseek.com")
+        self._add_row(api_card, "API Key", "api_key", "sk-", password=True)
+        self._add_row(api_card, "模型名称", "model", "deepseek-chat")
 
         # 按钮行
-        btn_row = tk.Frame(body, bg=self.BG)
-        btn_row.pack(fill="x", pady=(14, 6))
+        btn_row = tk.Frame(api_card, bg=self.CARD)
+        btn_row.pack(fill="x", pady=(12, 4))
         self._make_button(btn_row, "💾 保存配置", self._on_save).pack(side="left")
         self._make_button(btn_row, "🔗 测试连接", self._on_test).pack(side="left", padx=8)
-        # 记忆行
-        mem_row = tk.Frame(body, bg=self.BG)
+        mem_row = tk.Frame(api_card, bg=self.CARD)
         mem_row.pack(fill="x", pady=(2, 0))
-        self._make_button(mem_row, "🧹 清空奶蛙记忆", self._on_forget).pack(side="left")
+        self._make_button(mem_row, f"🧹 清空{self.owner.profile['name']}记忆",
+                          self._on_forget).pack(side="left")
 
         # 状态标签
         self.status_lbl = tk.Label(
-            body, text="", bg=self.BG, fg="#3A8F5F",
+            api_card, text="", bg=self.CARD, fg="#3A8F5F",
             font=("Microsoft YaHei", 11),
         )
-        self.status_lbl.pack(anchor="w", pady=(6, 0))
+        self.status_lbl.pack(anchor="w", pady=(8, 0))
         self._update_status()
 
-        # 分隔线
-        tk.Frame(body, bg="#E8DCC8", height=1).pack(fill="x", pady=12)
-
-        # 使用说明
-        tk.Label(
-            body, text="📖  使用说明", bg=self.BG, fg=self.TEXT,
-            font=("Microsoft YaHei", 11, "bold"),
-        ).pack(anchor="w")
+        # ---- 卡片3：使用说明 ----
+        help_card = self._make_card(body)
+        help_card.pack(fill="x")
+        self._card_title(help_card, "📖  使用说明")
+        pname = self.owner.profile["name"]
         tips = [
             "1. 填写上方 API 配置并点击「保存配置」",
-            "2. 右键奶蛙 → 「对话」，输入想说的话",
-            "3. 奶蛙会以可爱风格在气泡中回复你",
+            f"2. 右键{pname} → 「对话」，输入想说的话",
+            f"3. {pname}会以各自性格在气泡中回复你",
             "提示：支持任何 OpenAI 兼容接口",
         ]
         for tip in tips:
             tk.Label(
-                body, text=tip, bg=self.BG, fg="#7A6A58",
+                help_card, text=tip, bg=self.CARD, fg=self.SUB,
                 font=("Microsoft YaHei", 10),
             ).pack(anchor="w", pady=1)
 
     def _add_row(self, parent, label_text, key, placeholder, password=False):
         """配置表单项（标签 + 输入框）"""
-        row = tk.Frame(parent, bg=self.BG)
+        row = tk.Frame(parent, bg=self.CARD)
         row.pack(fill="x", pady=4)
         tk.Label(
-            row, text=label_text, bg=self.BG, fg=self.TEXT,
+            row, text=label_text, bg=self.CARD, fg=self.TEXT,
             font=("Microsoft YaHei", 11), width=9, anchor="w",
         ).pack(side="left")
         var = tk.StringVar(value=self.cfg.get(key, ""))
@@ -1595,7 +2356,8 @@ class MainMenu:
                 payload = {
                     "model": cfg["model"] or "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "你是一只叫奶蛙的可爱桌宠。"},
+                        {"role": "system",
+                         "content": f"你是一只叫{self.owner.profile['name']}的可爱桌宠。"},
                         {"role": "user", "content": "说一句简短的话证明你能听到"},
                     ],
                     "max_tokens": 30,
@@ -1623,9 +2385,17 @@ class MainMenu:
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_forget(self):
-        """清空奶蛙的记忆"""
+        """清空当前宠物的记忆"""
         self.owner.forget_all()
-        self.status_lbl.config(text="🧹  奶蛙的记忆已清空", fg="#3A8F5F")
+        self.status_lbl.config(text=f"🧹  {self.owner.profile['name']}的记忆已清空",
+                               fg="#3A8F5F")
+
+    def _on_switch_pet(self, pet_id):
+        """切换到另一个桌宠"""
+        name = PET_PROFILES[pet_id]["name"]
+        self.status_lbl.config(text=f"🔄  正在切换到 {name}...", fg="#4A3728")
+        self.win.update_idletasks()
+        self.owner.switch_to_pet(pet_id)
 
     def _update_status(self, text=None, color=None):
         """更新状态文字"""
@@ -1656,8 +2426,9 @@ class ChatDialog:
     BTN_HOV = "#FFA266"
     TEXT    = "#4A3728"   # 深棕文字
 
-    def __init__(self, parent):
+    def __init__(self, parent, pet_name="奶蛙"):
         self.result = None  # 用户输入的结果
+        self.pet_name = pet_name
 
         self.win = tk.Toplevel(parent)
         self.win.overrideredirect(True)
@@ -1682,7 +2453,7 @@ class ChatDialog:
         header.bind("<B1-Motion>", self._drag)
         header.bind("<Button-1>", self._drag_start)
         tk.Label(
-            header, text="💬  和奶蛙聊聊天", bg=self.HEADER, fg=self.TEXT,
+            header, text=f"💬  和{self.pet_name}聊聊天", bg=self.HEADER, fg=self.TEXT,
             font=("Microsoft YaHei", 13, "bold"),
         ).pack(side="left", padx=16)
         # 关闭按钮
@@ -1698,7 +2469,7 @@ class ChatDialog:
         body.pack(fill="both", expand=True)
 
         tk.Label(
-            body, text="对奶蛙说点什么吧：", bg=self.BG, fg=self.TEXT,
+            body, text=f"对{self.pet_name}说点什么吧：", bg=self.BG, fg=self.TEXT,
             font=("Microsoft YaHei", 11),
         ).pack(anchor="w", pady=(0, 6))
 
