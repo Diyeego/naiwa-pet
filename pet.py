@@ -72,6 +72,7 @@ NAIWA_PROFILE = {
     ],
     "persona": {
         "name": "奶蛙",
+        "self_title": "本蛙",
         "personality": "呆萌贪吃、乐观开朗、搞怪耍宝的小可爱",
         "background": (
             "来自异星的3岁黄色幼龙，住在用户电脑桌面上。"
@@ -122,6 +123,7 @@ TOMORIN_PROFILE = {
     ],
     "persona": {
         "name": "凑企鹅",
+        "self_title": "我",
         "personality": "内向害羞、感情细腻、容易感到寂寞，但下定决心就不会动摇的小企鹅",
         "background": (
             "住在用户电脑桌面上的小企鹅，源自《迷途之子》的高松灯。"
@@ -170,6 +172,7 @@ DOG_PROFILE = {
     ],
     "persona": {
         "name": "大狗",
+        "self_title": "汪",
         "personality": "憨憨的、嗓门大、爱叫唤，来自'叮咚鸡，大狗叫'梗的大狗",
         "background": (
             "住在用户电脑桌面上的大狗，出自网络神曲'叮咚鸡，大狗叫'。"
@@ -220,8 +223,8 @@ FLOAT_AMPLITUDE = 6
 FLOAT_SPEED = 2.0
 PET_ALPHA_THRESHOLD = 30
 
-# 绿幕色键
-CHROMA_G_MIN = 100; CHROMA_G_R = 1.2; CHROMA_G_B = 1.1
+# 绿幕色键（阈值较高，只认纯绿幕，避免误伤绿色主体如翅膀）
+CHROMA_G_MIN = 100; CHROMA_G_R = 1.5; CHROMA_G_B = 1.3
 
 # 说话参数
 SPEECH_CHAR_DELAY = 250; SPEECH_PUNCT_PAUSE = 350
@@ -866,6 +869,7 @@ class DesktopPet:
             self.physics.stop()
             self._restore_physics_appearance()
         if not os.path.exists(video_file):
+            self.show_speech_bubble(f"找不到视频文件：{video_file}")
             return
 
         self.float_paused = True
@@ -878,7 +882,8 @@ class DesktopPet:
 
         try:
             self._video_reader = imageio.get_reader(video_file)
-        except Exception:
+        except Exception as e:
+            self.show_speech_bubble(f"视频打开失败：{e}")
             self._restore_pet_ui()
             return
 
@@ -989,11 +994,16 @@ class DesktopPet:
             b[spill] += (spill_amount * 0.4).astype(np.int16)
             g[spill] -= (spill_amount * 0.8).astype(np.int16)
 
-        # 近黑像素（视频源边缘的黑边/纯黑背景）→ 透明，避免黑边
-        # 仅当像素非常暗（R/G/B 均 < 50）才处理，避免误伤深色主体
-        black_mask = (r < 50) & (g < 50) & (b < 50)
+        # 近黑像素（视频源边缘的黑边）→ 透明，避免黑边
+        # 只处理画面左右边缘的黑边，避免误伤主体内的深色（如翅膀）
+        hh, ww = r.shape
+        edge_w = int(ww * 0.08)  # 左右各 8% 视为边缘
+        edge_cols = np.zeros(ww, dtype=bool)
+        edge_cols[:edge_w] = True
+        edge_cols[ww - edge_w:] = True
+        black_mask = (r < 50) & (g < 50) & (b < 50) & edge_cols[None, :]
 
-        # 绿幕 + 黑边像素 → 纯 magenta（透明色），窗口透掉
+        # 绿幕 + 边缘黑边像素 → 纯 magenta（透明色），窗口透掉
         a[green_mask | black_mask] = (255, 0, 255)
 
         return np.clip(a, 0, 255).astype(np.uint8)
@@ -1513,9 +1523,12 @@ class DesktopPet:
     def _build_persona_prompt(self):
         """根据当前宠物的人格设定生成 system prompt"""
         p = self.profile["persona"]
+        title = p.get("self_title", "我")
         return (
-            f"你叫{p['name']}，一只有点{p['personality']}的桌面宠物。"
-            f"背景：{p['background']}。{p['style']}。"
+            f"你是{p['name']}，一只有点{p['personality']}的桌面宠物。"
+            f"背景：{p['background']}。"
+            f"你思考时始终以{p['name']}的身份和口吻进行，不要跳脱角色；"
+            f"回答用户时自称「{title}」。{p['style']}。"
             f"你喜欢的：{'、'.join(p['likes'])}；你讨厌的：{'、'.join(p['dislikes'])}。"
         )
 
@@ -1675,7 +1688,8 @@ class DesktopPet:
                          self.window.winfo_x(), self.window.winfo_y())
         try:
             self._video_reader = imageio.get_reader(video)
-        except Exception:
+        except Exception as e:
+            self.show_speech_bubble(f"视频打开失败：{e}")
             self._restore_pet_ui()
             return
         meta = self._video_reader.get_meta_data()
