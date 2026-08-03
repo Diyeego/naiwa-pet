@@ -240,6 +240,14 @@ MEMORY_MAX_MESSAGES = 8
 
 MAGENTA = (255, 0, 255); MAGENTA_HEX = "#ff00ff"
 
+# Windows 隐藏子进程控制台窗口（防止 ffmpeg 转音频时弹黑色控制台）
+_SUB_FLAGS = {}
+if os.name == "nt":
+    try:
+        _SUB_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW}
+    except Exception:
+        _SUB_FLAGS = {}
+
 # 自定义菜单配色（bongocat 风格）
 MENU_BG = "#2D2D30"
 MENU_HOVER = "#3E3E42"
@@ -956,7 +964,7 @@ class DesktopPet:
                 extras = [] if src == video_file and not audio_file else ["-vn"]
                 cmd = [ff, "-y", "-i", src] + extras + [
                     "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", wav]
-                subprocess.run(cmd, capture_output=True, check=True)
+                subprocess.run(cmd, capture_output=True, check=True, **_SUB_FLAGS)
             except Exception:
                 pass
         return wav
@@ -981,8 +989,12 @@ class DesktopPet:
             b[spill] += (spill_amount * 0.4).astype(np.int16)
             g[spill] -= (spill_amount * 0.8).astype(np.int16)
 
-        # 绿幕像素 → 纯 magenta（透明色），窗口透掉
-        a[green_mask] = (255, 0, 255)
+        # 近黑像素（视频源边缘的黑边/纯黑背景）→ 透明，避免黑边
+        # 仅当像素非常暗（R/G/B 均 < 50）才处理，避免误伤深色主体
+        black_mask = (r < 50) & (g < 50) & (b < 50)
+
+        # 绿幕 + 黑边像素 → 纯 magenta（透明色），窗口透掉
+        a[green_mask | black_mask] = (255, 0, 255)
 
         return np.clip(a, 0, 255).astype(np.uint8)
 
@@ -1175,7 +1187,7 @@ class DesktopPet:
                 ff = imageio_ffmpeg.get_ffmpeg_exe()
                 subprocess.run([ff, "-y", "-i", src, "-acodec", "pcm_s16le",
                                 "-ar", "44100", "-ac", "2", wav],
-                               capture_output=True, check=True)
+                               capture_output=True, check=True, **_SUB_FLAGS)
             except Exception:
                 pass
         return wav
@@ -2067,15 +2079,20 @@ class DesktopPet:
     # ========== 宠物切换 ==========
 
     def switch_to_pet(self, pet_id):
-        """切换到另一个桌宠（os.execv 直接替换进程，最可靠）"""
+        """切换到另一个桌宠（新进程启动 + 延迟退出，兼容 PyInstaller）"""
         if pet_id not in PET_PROFILES or pet_id == self.profile["id"]:
             return
         save_active_pet(pet_id)   # 写入新宠物
-        self.save_total_minutes()  # 保存陪伴时长（execv 后无清理机会）
-        if getattr(sys, "frozen", False):
-            os.execv(sys.executable, [sys.executable])
-        else:
-            os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
+        self.save_total_minutes()
+        try:
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable])
+            else:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+        except Exception:
+            pass
+        # 延迟退出，给新进程启动时间
+        self.window.after(300, self.quit)
 
     # ========== 退出 ==========
 
