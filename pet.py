@@ -64,6 +64,19 @@ NAIWA_PROFILE = {
             "width": 600,
         },
     },
+    # 蓄力机制（音效从 voice 文件夹随机抽取）
+    "charge": {
+        "dogdog": None,                 # 蓄力音：随机
+        "wolf": None,                   # 发射音：随机
+        "voice_folder": "naiwa/voice",  # 随机音效来源
+        "release_image": "naiwa/naiwa4.png",  # 发射时形象
+        "speedup": 0.15,
+        "wolf_slow": 0.09,
+        "wolf_min_speed": 0.3,
+        "wolf_fast_threshold": 0.5,
+        "wolf_fast_max": 1.8,
+        "max_speed": 2.5,
+    },
     "speech_method": "laugh",  # 用大笑音效说话
     "right_click": [
         ("切换形象", "switch_image"),
@@ -93,9 +106,21 @@ NAIWA_PROFILE = {
 TOMORIN_PROFILE = {
     "id": "tomorin",
     "name": "凑企鹅",
-    "images": ["tomorin/tomotin1.png"],
+    "images": ["tomorin/tomorin1.png"],
     "image_switch_interval": None,  # 不自动切换形象
     "display_scale": 0.7,           # 体型缩小为 0.7 倍
+    # 蓄力机制（同大狗叫）
+    "charge": {
+        "dogdog": "tomorin/voice/gugugaga.mp3",  # 蓄力音
+        "wolf": "tomorin/voice/ea.mp3",          # 发射音
+        "release_image": "tomorin/tomorin2.png", # 发射时形象
+        "speedup": 0.15,
+        "wolf_slow": 0.09,
+        "wolf_min_speed": 0.3,
+        "wolf_fast_threshold": 0.5,
+        "wolf_fast_max": 1.8,
+        "max_speed": 2.5,
+    },
     "videos": {
         "跳舞": {
             "file": "tomorin/tomorin_dance.mp4",
@@ -495,6 +520,7 @@ class DesktopPet:
         self._charging = False
         self._charge_start = 0.0
         self._charge_level = 1
+        self._charge_prev_index = 0
         self._charge_audio = {}
         self._dogdog_sound = None
         self._wolf_sound = None
@@ -1171,9 +1197,12 @@ class DesktopPet:
     # ========== 大狗蓄力机制 ==========
 
     def _load_charge_audio(self):
-        """预加载蓄力音频（mp3→wav→numpy 数组）"""
+        """预加载蓄力音频（mp3→wav→numpy 数组），支持 voice 文件夹随机抽取"""
         charge = self.profile.get("charge", {})
-        for name, src in [("dogdog", charge.get("dogdog")), ("wolf", charge.get("wolf"))]:
+        for name in ["dogdog", "wolf"]:
+            src = charge.get(name)
+            if not src or not os.path.exists(src):
+                src = self._pick_random_voice(charge, name)
             if not src or not os.path.exists(src):
                 continue
             try:
@@ -1182,6 +1211,21 @@ class DesktopPet:
                 self._charge_audio[name] = pygame.sndarray.samples(snd)
             except Exception:
                 pass
+
+    def _pick_random_voice(self, charge, name):
+        """从 voice_folder 随机选一个音频（蓄力/发射互不重复）"""
+        folder = charge.get("voice_folder")
+        if not folder or not os.path.isdir(folder):
+            return None
+        files = [os.path.join(folder, f) for f in os.listdir(folder)
+                 if f.lower().endswith((".mp3", ".wav", ".m4a", ".ogg"))]
+        # 排除另一个已选中的音
+        other = charge.get("wolf") if name == "dogdog" else charge.get("dogdog")
+        if other in files:
+            files = [f for f in files if f != other]
+        if files:
+            return random.choice(files)
+        return None
 
     def _mp3_to_wav(self, src):
         """mp3 → wav（缓存到临时目录，缓存键含文件大小+mtime，音效更新自动重新转换）"""
@@ -1218,12 +1262,13 @@ class DesktopPet:
         return res.astype(audio.dtype)
 
     def _start_charge(self):
-        """按住开始蓄力：播放 dogdog，每次循环加速"""
+        """按住开始蓄力：播放蓄力音，每次循环加速"""
         if self._charging or "dogdog" not in self._charge_audio:
             return
         self._charging = True
         self._charge_start = time.time()
         self._charge_level = 1
+        self._charge_prev_index = self.current_pet_index  # 记录蓄力前形象
         self._play_dogdog(1.0)
 
     def _play_dogdog(self, speed):
@@ -1298,12 +1343,16 @@ class DesktopPet:
                 pass
 
     def _restore_dog_idle(self):
-        """wolf 播完，恢复 dog1 形象"""
+        """发射音播完，恢复蓄力前形象"""
         if self._charging:
             return  # 又按下蓄力了
-        img = self.profile["images"][0]
-        if os.path.exists(img):
-            self._apply_release_image(img)
+        idx = getattr(self, "_charge_prev_index", 0)
+        if 0 <= idx < len(self.pet_pil):
+            self._apply_pet_image(idx)
+        else:
+            img = self.profile["images"][0]
+            if os.path.exists(img):
+                self._apply_release_image(img)
 
     def _apply_release_image(self, imgfile):
         """加载释放后的形象（dog2），并更新窗口尺寸"""
