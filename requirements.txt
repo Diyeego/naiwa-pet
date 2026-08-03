@@ -1,0 +1,5 @@
+Pillow
+imageio
+imageio-ffmpeg
+pygame
+numpy
