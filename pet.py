@@ -8,8 +8,10 @@
 - 左键拖拽移动；快速松手 → 物理甩动（重力 + 边缘反弹 + 挤压形变）
 - 大笑视频：绿幕色键抠图 → 透明播放，切换无痕
 - 陪伴时长跨会话持久化，启动时显示问候气泡
-- 对话功能：OpenAI 兼容 API，桌面气泡显示奶蛙回复
-- 主菜单：API 配置窗口（Base URL / Key / 模型）
+- 对话功能：OpenAI 兼容 API，奶蛙用大笑音效"说话"（逐字+标点停顿+淡出）
+- 记忆：对话历史持久化，奶蛙记得之前聊过的内容（主菜单可清空）
+- 人格化：结构化性格设定（参考 airi Character Card）
+- 主菜单：API 配置窗口（Base URL / Key / 模型 / 清空记忆）
 - 右键菜单：陪伴时长(信息)、切换形象、对话、大笑、主菜单、退出
 """
 
@@ -62,11 +64,33 @@ FLOAT_SPEED = 2.0                                   # 飘浮速度
 PET_ALPHA_THRESHOLD = 30                            # 图片 alpha 低于此值视为背景（透掉）
 TIME_FILE = os.path.join(DATA_DIR, "naiwa_time.txt")   # 陪伴时长持久化文件（用户数据目录）
 API_CONFIG_FILE = os.path.join(DATA_DIR, "api_config.json")  # API 配置持久化文件（用户数据目录）
+CHAT_HISTORY_FILE = os.path.join(DATA_DIR, "chat_history.json")  # 对话记忆持久化文件
+MEMORY_MAX_MESSAGES = 8     # 记忆保留最近的消息条数（约 4 轮对话）
+
+# 奶蛙人格设定（参考 airi 的 Character Card 结构）
+NAIWA_PERSONA = {
+    "name": "奶蛙",
+    "personality": "憨憨的、乐观、有点迷糊、好奇心强的小可爱",
+    "background": "一只住在用户电脑桌面上的小奶蛙，会漂浮、甩动、吃小虫子",
+    "style": (
+        "回复要求：1. 简短（40字以内）2. 可爱有趣，带一点点憨 3. 中文为主，"
+        "偶尔用颜文字(๑˃ᴗ˂)ﻭ 4. 自称\"本蛙\" 5. 会记得之前聊过的内容"
+    ),
+    "likes": ["被夸奖", "晒日光浴", "和用户聊天"],
+    "dislikes": ["孤独", "被忽略"],
+}
 
 # 绿幕色键参数
 CHROMA_G_MIN = 100      # 绿色通道最低值（排除暗部）
 CHROMA_G_R = 1.2        # G > R × 此系数
 CHROMA_G_B = 1.1        # G > B × 此系数
+
+# 奶蛙笑声说话参数
+SPEECH_CHAR_DELAY = 250     # 每字显示间隔（ms）
+SPEECH_PUNCT_PAUSE = 350    # 标点停顿（ms，笑声同步暂停）
+SPEECH_PUNCT = "，。！？；…、,.!?;"
+SPEECH_FADE_STEP = 0.1      # 淡出音量衰减步长
+SPEECH_FADE_DELAY = 60      # 淡出每步间隔（ms）
 
 # 物理甩动参数（速度单位：像素/帧，60fps）
 PHYS_GRAVITY    = 0.32   # 重力加速度（×0.8，弹更久）
@@ -313,6 +337,15 @@ class DesktopPet:
         # API 对话结果队列（后台线程 → 主线程轮询）
         self._api_result_queue = queue.Queue()
 
+        # 大笑说话状态
+        self._speech_active = False
+        self._speech_text = ""
+        self._speech_visible = ""
+        self._speech_idx = 0
+        self._speech_job = None
+        self._speech_var = None
+        self._speech_bubble = None
+
         # 自动修正旧配置的 model 名大小写
         try:
             cfg = self.load_api_config()
@@ -401,9 +434,12 @@ class DesktopPet:
     # ========== 鼠标事件处理 ==========
 
     def on_mouse_down(self, event):
-        """鼠标按下：抓住飞行的奶蛙/记录起始位置；播放视频时左键=中断"""
+        """鼠标按下：抓住飞行的奶蛙/记录起始位置；播放视频/说话时左键=中断"""
         if self.video_playing:
             self.stop_video_playback()
+            return
+        if self._speech_active:
+            self.stop_speech()
             return
 
         # 抓住正在飞行的奶蛙
@@ -554,6 +590,8 @@ class DesktopPet:
         """在桌宠窗口内嵌播放大笑视频"""
         if self.video_playing:
             self.stop_video_playback()
+        if self._speech_active:
+            self.stop_speech()
         # 停止物理飞行（若有）
         if self.physics.active:
             self.physics.stop()
@@ -984,6 +1022,8 @@ class DesktopPet:
         """右键菜单：与奶蛙对话（自定义输入窗 + 桌面气泡回复）"""
         if self.video_playing:
             self.stop_video_playback()
+        if self._speech_active:
+            self.stop_speech()
 
         if not self.is_api_configured():
             self.show_speech_bubble("本蛙还不会说话～主菜单已打开，填上你的 API Key 就能聊啦！")
@@ -1009,28 +1049,61 @@ class DesktopPet:
             daemon=True,
         ).start()
 
+    def _build_persona_prompt(self):
+        """根据奶蛙人格设定生成 system prompt"""
+        p = NAIWA_PERSONA
+        return (
+            f"你叫{p['name']}，一只有点{p['personality']}的桌面宠物。"
+            f"背景：{p['background']}。{p['style']}。"
+            f"你喜欢的：{'、'.join(p['likes'])}；你讨厌的：{'、'.join(p['dislikes'])}。"
+        )
+
+    def load_chat_history(self):
+        """从用户数据目录读取对话记忆"""
+        try:
+            with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+                return history if isinstance(history, list) else []
+        except Exception:
+            return []
+
+    def save_chat_history(self, history):
+        """保存对话记忆到用户数据目录"""
+        try:
+            with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def remember(self, role, content):
+        """记录一条对话，保留最近若干条"""
+        history = self.load_chat_history()
+        history.append({"role": role, "content": content})
+        history = history[-MEMORY_MAX_MESSAGES:]
+        self.save_chat_history(history)
+
+    def forget_all(self):
+        """清空对话记忆"""
+        self.save_chat_history([])
+
     def _api_chat_worker(self, cfg, prompt):
-        """后台线程：调用 OpenAI 兼容 API，结果放入队列"""
+        """后台线程：调用 OpenAI 兼容 API（带人格 + 记忆），结果放入队列"""
         try:
             url = cfg["base_url"].rstrip("/")
             if not url.endswith("/v1"):
                 url += "/v1"
             url += "/chat/completions"
 
+            # 人格 prompt + 历史记忆 + 当前输入
+            # （借鉴 airi：给用户消息加时间前缀，让奶蛙感知时间）
+            messages = [{"role": "system", "content": self._build_persona_prompt()}]
+            messages.extend(self.load_chat_history())
+            now_str = time.strftime("%Y-%m-%d %H:%M")
+            messages.append({"role": "user", "content": f"[{now_str}] {prompt}"})
+
             payload = {
                 "model": cfg["model"],
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是奶蛙（Naiwa），一只有点憨憨的可爱桌面宠物，"
-                            "住在用户的电脑桌面上。回复要求："
-                            "1. 简短（40字以内）2. 可爱有趣 3. 中文为主，"
-                            "偶尔用颜文字 4. 自称\"本蛙\"。"
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+                "messages": messages,
                 "max_tokens": 200,
                 "temperature": 0.8,
             }
@@ -1043,12 +1116,17 @@ class DesktopPet:
                     "Authorization": f"Bearer {cfg['api_key']}",
                 },
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
             reply = data["choices"][0]["message"]["content"].strip()
             if not reply:
                 reply = "本蛙没听清...你再说一遍？"
+
+            # 存入记忆（记住这次对话）
+            self.remember("user", prompt)
+            self.remember("assistant", reply)
+
             self._api_result_queue.put(reply)
         except urllib.error.HTTPError as e:
             # 显示 API 返回的具体错误原因
@@ -1063,14 +1141,155 @@ class DesktopPet:
             self._api_result_queue.put("本蛙的信号不太好... 🐸")
 
     def _api_poll(self):
-        """主线程轮询 API 结果队列（每 200ms），显示回复气泡"""
+        """主线程轮询 API 结果队列（每 200ms），奶蛙用笑声说话回复"""
         try:
             while not self._api_result_queue.empty():
                 result = self._api_result_queue.get_nowait()
-                self.show_speech_bubble(result)
+                self.speak_with_laugh(result)
         except Exception:
             pass
         self._api_poll_job = self.window.after(200, self._api_poll)
+
+    # ========== 奶蛙笑声说话 ==========
+
+    def speak_with_laugh(self, text):
+        """奶蛙用笑声"说话"：逐字显示 + 笑声随标点停顿 + 淡出收尾"""
+        self.stop_speech()  # 打断旧的说话
+        self.close_greet_bubble()
+
+        # 播放大笑（作为奶蛙的声音）
+        if self.audio_ok:
+            try:
+                pygame.mixer.music.load(self._ensure_audio_wav())
+                pygame.mixer.music.play()
+            except Exception:
+                pass
+
+        # 创建逐字气泡
+        self._speech_active = True
+        self._speech_text = text
+        self._speech_visible = ""
+        self._speech_idx = 0
+        self._create_speech_bubble()
+        self._speech_tick()
+
+    def _create_speech_bubble(self):
+        """创建逐字显示的对话气泡"""
+        bubble = tk.Toplevel(self.window)
+        bubble.overrideredirect(True)
+        bubble.wm_attributes("-topmost", True)
+        bubble.wm_attributes("-toolwindow", True)
+        bubble.configure(bg="#FFFBF0")
+        bubble.transient(self.window)
+
+        max_chars = 22  # 每行约 22 字
+        bubble_w = max_chars * 16 + 28
+        bubble_h = 100
+        bubble.geometry(f"{bubble_w}x{bubble_h}")
+
+        self._speech_var = tk.StringVar(value="")
+        tk.Label(
+            bubble, textvariable=self._speech_var, bg="#FFFBF0", fg="#4A3728",
+            font=("Microsoft YaHei", 12), justify="left", anchor="nw",
+            wraplength=bubble_w - 28, padx=14, pady=10,
+        ).pack(fill="both", expand=True)
+
+        # 位置：奶蛙上方
+        pet_x = self.window.winfo_rootx()
+        pet_y = self.window.winfo_rooty()
+        bx = pet_x + self.pet_width // 2 - bubble_w // 2
+        by = pet_y - bubble_h - 10
+        bx = max(0, min(bx, self.window.winfo_screenwidth() - bubble_w))
+        by = max(0, by)
+        bubble.geometry(f"+{bx}+{by}")
+
+        self._speech_bubble = bubble
+
+    def _speech_tick(self):
+        """逐字推进文字，标点处笑声同步停顿"""
+        if not self._speech_active:
+            return
+        i = self._speech_idx
+        if i >= len(self._speech_text):
+            # 全部显示完 → 淡出笑声
+            self._fadeout_speech()
+            return
+
+        ch = self._speech_text[i]
+        self._speech_visible += ch
+        self._speech_idx += 1
+        try:
+            self._speech_var.set(self._speech_visible)
+        except Exception:
+            pass
+
+        if ch in SPEECH_PUNCT:
+            # 标点停顿：文字和笑声同步暂停
+            if self.audio_ok:
+                try:
+                    pygame.mixer.music.pause()
+                except Exception:
+                    pass
+            self._speech_job = self.window.after(SPEECH_PUNCT_PAUSE, self._speech_resume)
+        else:
+            self._speech_job = self.window.after(SPEECH_CHAR_DELAY, self._speech_tick)
+
+    def _speech_resume(self):
+        """标点停顿后恢复"""
+        if not self._speech_active:
+            return
+        if self.audio_ok:
+            try:
+                pygame.mixer.music.unpause()
+            except Exception:
+                pass
+        self._speech_job = self.window.after(SPEECH_CHAR_DELAY, self._speech_tick)
+
+    def _fadeout_speech(self, vol=1.0):
+        """笑声淡出收尾"""
+        if not self._speech_active:
+            return
+        if self.audio_ok:
+            try:
+                if vol <= 0:
+                    pygame.mixer.music.stop()
+                else:
+                    pygame.mixer.music.set_volume(max(vol - SPEECH_FADE_STEP, 0))
+                    self._speech_job = self.window.after(
+                        SPEECH_FADE_DELAY, lambda: self._fadeout_speech(vol - SPEECH_FADE_STEP))
+                    return
+            except Exception:
+                pass
+        # 淡出完成，关闭气泡并停留显示几秒
+        self._speech_active = False
+        self._speech_job = self.window.after(3000, self._close_speech_bubble)
+
+    def stop_speech(self):
+        """中断奶蛙说话（打断笑声 + 关闭气泡）"""
+        self._speech_active = False
+        if self._speech_job:
+            try:
+                self.window.after_cancel(self._speech_job)
+            except Exception:
+                pass
+            self._speech_job = None
+        if self.audio_ok:
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+        self._close_speech_bubble()
+
+    def _close_speech_bubble(self):
+        """关闭说话气泡"""
+        self._speech_job = None
+        if self._speech_bubble:
+            try:
+                self._speech_bubble.destroy()
+            except Exception:
+                pass
+            self._speech_bubble = None
+        self._speech_var = None
 
     def show_speech_bubble(self, text, duration=12000):
         """在奶蛙上方显示对话气泡（支持多行折行）"""
@@ -1158,6 +1377,7 @@ class DesktopPet:
     def quit(self):
         """退出程序"""
         self.video_playing = False
+        self.stop_speech()
         if self._video_frame_job:
             try:
                 self.window.after_cancel(self._video_frame_job)
@@ -1267,6 +1487,10 @@ class MainMenu:
         btn_row.pack(fill="x", pady=(14, 6))
         self._make_button(btn_row, "💾 保存配置", self._on_save).pack(side="left")
         self._make_button(btn_row, "🔗 测试连接", self._on_test).pack(side="left", padx=8)
+        # 记忆行
+        mem_row = tk.Frame(body, bg=self.BG)
+        mem_row.pack(fill="x", pady=(2, 0))
+        self._make_button(mem_row, "🧹 清空奶蛙记忆", self._on_forget).pack(side="left")
 
         # 状态标签
         self.status_lbl = tk.Label(
@@ -1397,6 +1621,11 @@ class MainMenu:
                     text="❌  连接失败，请检查网络或配置", fg="#C0502F"))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_forget(self):
+        """清空奶蛙的记忆"""
+        self.owner.forget_all()
+        self.status_lbl.config(text="🧹  奶蛙的记忆已清空", fg="#3A8F5F")
 
     def _update_status(self, text=None, color=None):
         """更新状态文字"""
